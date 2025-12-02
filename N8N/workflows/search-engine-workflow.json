@@ -1,0 +1,343 @@
+{
+  "name": "Search Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "search",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "search-webhook-trigger",
+      "name": "Search Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "search-engine-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate input structure\nconst inputData = $input.all()[0]?.json;\n\nif (!inputData || !inputData.parsedQuery) {\n  return [{\n    json: {\n      success: false,\n      error: \"Invalid input format - missing parsedQuery\",\n      errorType: \"validation_error\"\n    }\n  }];\n}\n\nconst { parsedQuery } = inputData;\n\n// Validate required fields\nif (!parsedQuery.jobTitles || parsedQuery.jobTitles.length === 0) {\n  return [{\n    json: {\n      success: false,\n      error: \"No job titles found in query - cannot search\",\n      errorType: \"missing_job_titles\"\n    }\n  }];\n}\n\n// Valid input, proceed with search\nreturn [{\n  json: {\n    success: true,\n    originalQuery: inputData.originalQuery,\n    parsedQuery: parsedQuery,\n    status: \"validated\"\n  }\n}];"
+      },
+      "id": "validate-search-input",
+      "name": "Validate Search Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { parsedQuery, originalQuery } = $input.all()[0]?.json;\n\n// Build search components\nconst siteFilter = \"site:linkedin.com/in/\";\nconst searchComponents = [];\n\n// Add job titles (exact match for better results)\nif (parsedQuery.jobTitles && parsedQuery.jobTitles.length > 0) {\n  const titleQueries = parsedQuery.jobTitles.map(title => `\"${title}\"`);\n  searchComponents.push(`(${titleQueries.join(\" OR \")})`);\n}\n\n// Add skills\nif (parsedQuery.skills && parsedQuery.skills.length > 0) {\n  const skillQueries = parsedQuery.skills.map(skill => skill);\n  searchComponents.push(`(${skillQueries.join(\" OR \")})`);\n}\n\n// Add location\nif (parsedQuery.location) {\n  searchComponents.push(`\"${parsedQuery.location}\"`);\n}\n\n// Add experience if specified\nif (parsedQuery.experience) {\n  searchComponents.push(`\"${parsedQuery.experience}+ years\" OR \"${parsedQuery.experience}+ years\"`);\n}\n\n// Add keywords\nif (parsedQuery.keywords && parsedQuery.keywords.length > 0) {\n  searchComponents.push(parsedQuery.keywords.join(\" \"));\n}\n\n// Add company type filter\nif (parsedQuery.companyType) {\n  searchComponents.push(parsedQuery.companyType);\n}\n\n// Combine all components\nconst searchQuery = `${siteFilter} ${searchComponents.join(\" \")}`.trim();\n\n// Alternative queries for better coverage\nconst alternativeQueries = [];\n\n// Simpler query with just job titles\nif (parsedQuery.jobTitles.length > 1) {\n  const simpleQuery = `${siteFilter} \"${parsedQuery.jobTitles[0]}\"`;\n  alternativeQueries.push(simpleQuery);\n}\n\n// Query with location emphasis\nif (parsedQuery.location && parsedQuery.jobTitles.length > 0) {\n  const locationQuery = `${siteFilter} \"${parsedQuery.jobTitles[0]}\" \"${parsedQuery.location}\"`;\n  alternativeQueries.push(locationQuery);\n}\n\nreturn [{\n  json: {\n    originalQuery: originalQuery,\n    parsedQuery: parsedQuery,\n    searchQuery: searchQuery,\n    alternativeQueries: alternativeQueries,\n    queryComplexity: searchComponents.length\n  }\n}];"
+      },
+      "id": "build-search-query",
+      "name": "Construct Google Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.serpstack.com/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"access_key\": \"{{ $credentials.serpStackApi?.accessKey || $env.SERPSTACK_ACCESS_KEY }}\",\n  \"query\": \"{{ $json.searchQuery }}\",\n  \"engine\": \"google\",\n  \"location\": \"{{ $json.parsedQuery.location || 'United States' }}\",\n  \"google_domain\": \"google.com\",\n  \"gl\": \"us\",\n  \"hl\": \"en\",\n  \"num\": 10,\n  \"device\": \"desktop\",\n  \"safe_search\": \"off\"\n}",
+        "options": {}
+      },
+      "id": "serpstack-search",
+      "name": "SerpStack Google Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 200],
+      "credentials": {
+        "serpStackApi": {
+          "id": "serpstack-credentials",
+          "name": "SerpStack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const serpStackResponse = $input.all()[0]?.json;\nconst searchParams = $(\"Build Search Query\").all()[0]?.json;\n\nif (!serpStackResponse || serpStackResponse.error) {\n  return [{\n    json: {\n      success: false,\n      error: serpStackResponse?.error?.message || \"SerpStack API error\",\n      errorType: \"serpstack_error\",\n      searchParams: searchParams,\n      apiUsed: \"serpstack_failed\"\n    }\n  }];\n}\n\n// Extract organic results\nconst organicResults = serpStackResponse.organic_results || [];\n\n// Filter for LinkedIn profiles only\nconst linkedinResults = organicResults\n  .filter(result => {\n    const url = result.link || '';\n    return url.includes('linkedin.com/in/') && !url.includes('/pub/');\n  })\n  .slice(0, 10) // Limit to 10 results\n  .map((result, index) => ({\n    title: result.title || '',\n    url: result.link || '',\n    snippet: result.snippet || '',\n    position: index + 1,\n    displayed_link: result.displayed_link || ''\n  }));\n\n// Extract additional metadata\nconst searchInfo = {\n  totalResults: serpStackResponse.search_information?.total_results || 0,\n  searchTime: serpStackResponse.search_information?.time_taken_displayed || 0,\n  queryPerformed: serpStackResponse.search_parameters?.q || searchParams.searchQuery\n};\n\nreturn [{\n  json: {\n    success: true,\n    data: {\n      searchQuery: searchParams.searchQuery,\n      originalQuery: searchParams.originalQuery,\n      parsedQuery: searchParams.parsedQuery,\n      results: linkedinResults,\n      totalResults: linkedinResults.length,\n      searchTime: searchInfo.searchTime,\n      totalSearchResults: searchInfo.totalResults,\n      apiUsed: \"serpstack\",\n      searchMetadata: searchInfo\n    },\n    metadata: {\n      workflow: \"search-engine\",\n      version: \"1.0.0\"\n    }\n  }\n}];"
+      },
+      "id": "process-serpstack-response",
+      "name": "Process SerpStack Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.success }}",
+              "operation": "equal",
+              "value2": false
+            },
+            {
+              "value1": "={{ $json.data.results.length }}",
+              "operation": "equal",
+              "value2": 0
+            },
+            {
+              "combineOperation": "OR"
+            }
+          ]
+        }
+      },
+      "id": "check-serpstack-success",
+      "name": "Check SerpStack Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://serpapi.com/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"engine\": \"google\",\n  \"q\": \"{{ $json.searchQuery }}\",\n  \"location\": \"{{ $json.parsedQuery.location || 'United States' }}\",\n  \"google_domain\": \"google.com\",\n  \"gl\": \"us\",\n  \"hl\": \"en\",\n  \"num\": 10,\n  \"api_key\": \"{{ $credentials.serpApi?.apiKey || $env.SERPAPI_API_KEY }}\"\n}",
+        "options": {}
+      },
+      "id": "serpapi-fallback-search",
+      "name": "SerpApi Fallback Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 100],
+      "credentials": {
+        "serpApi": {
+          "id": "serpapi-credentials",
+          "name": "SerpApi API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const serpApiResponse = $input.all()[0]?.json;\nconst searchParams = $(\"Build Search Query\").all()[0]?.json;\n\nif (serpApiResponse.error || !serpApiResponse.organic_results) {\n  return [{\n    json: {\n      success: false,\n      error: \"Both primary and fallback search failed\",\n      primaryError: \"SerpStack search failed or returned no results\",\n      fallbackError: serpApiResponse.error || \"SerpApi returned no results\",\n      errorType: \"search_failed\",\n      searchParams: searchParams\n    }\n  }];\n}\n\n// Process SerpApi results (similar to SerpStack processing)\nconst organicResults = serpApiResponse.organic_results || [];\n\nconst linkedinResults = organicResults\n  .filter(result => {\n    const url = result.link || '';\n    return url.includes('linkedin.com/in/') && !url.includes('/pub/');\n  })\n  .slice(0, 10)\n  .map((result, index) => ({\n    title: result.title || '',\n    url: result.link || '',\n    snippet: result.snippet || '',\n    position: index + 1,\n    displayed_link: result.displayed_link || ''\n  }));\n\nconst searchInfo = {\n  totalResults: serpApiResponse.search_information?.total_results || 0,\n  searchTime: serpApiResponse.search_information?.time_taken_displayed || 0,\n  queryPerformed: serpApiResponse.search_parameters?.q || searchParams.searchQuery\n};\n\nreturn [{\n  json: {\n    success: true,\n    data: {\n      searchQuery: searchParams.searchQuery,\n      originalQuery: searchParams.originalQuery,\n      parsedQuery: searchParams.parsedQuery,\n      results: linkedinResults,\n      totalResults: linkedinResults.length,\n      searchTime: searchInfo.searchTime,\n      totalSearchResults: searchInfo.totalResults,\n      apiUsed: \"serpapi\",\n      searchMetadata: searchInfo,\n      note: \"Used fallback search service\"\n    },\n    metadata: {\n      workflow: \"search-engine\",\n      version: \"1.0.0\"\n    }\n  }\n}];"
+      },
+      "id": "process-serpapi-response",
+      "name": "Process SerpApi Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 100]
+    },
+    {
+      "parameters": {
+        "mode": "combineByPosition",
+        "mergeByPosition": 0
+      },
+      "id": "merge-search-results",
+      "name": "Combine Primary and Fallback",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const searchResult = $input.all()[0]?.json;\n\nif (!searchResult.success) {\n  // Error already formatted, return as-is\n  return [searchResult];\n}\n\nconst { results, parsedQuery } = searchResult.data;\n\n// Score and filter results based on relevance\nconst scoredResults = results.map(result => {\n  let score = 0;\n  const title = (result.title || '').toLowerCase();\n  const snippet = (result.snippet || '').toLowerCase();\n  \n  // Job title matching (highest weight)\n  if (parsedQuery.jobTitles) {\n    parsedQuery.jobTitles.forEach(jobTitle => {\n      if (title.includes(jobTitle.toLowerCase())) {\n        score += 10;\n      }\n      if (snippet.includes(jobTitle.toLowerCase())) {\n        score += 5;\n      }\n    });\n  }\n  \n  // Skills matching\n  if (parsedQuery.skills) {\n    parsedQuery.skills.forEach(skill => {\n      if (title.includes(skill.toLowerCase())) {\n        score += 3;\n      }\n      if (snippet.includes(skill.toLowerCase())) {\n        score += 2;\n      }\n    });\n  }\n  \n  // Location matching\n  if (parsedQuery.location) {\n    if (title.includes(parsedQuery.location.toLowerCase()) || \n        snippet.includes(parsedQuery.location.toLowerCase())) {\n      score += 5;\n    }\n  }\n  \n  // Keywords matching\n  if (parsedQuery.keywords) {\n    parsedQuery.keywords.forEach(keyword => {\n      if (title.includes(keyword.toLowerCase()) || \n          snippet.includes(keyword.toLowerCase())) {\n        score += 1;\n      }\n    });\n  }\n  \n  // LinkedIn URL quality check\n  const url = result.url || '';\n  if (url.includes('/in/') && !url.match(/\\/in\\/[^\\/]+\\/$/)) {\n    score += 2; // Proper LinkedIn profile URL\n  }\n  \n  return {\n    ...result,\n    relevanceScore: score\n  };\n});\n\n// Sort by relevance score (highest first)\nscoredResults.sort((a, b) => b.relevanceScore - a.relevanceScore);\n\n// Filter out low-quality results (score < 2)\nconst filteredResults = scoredResults.filter(result => result.relevanceScore >= 2);\n\n// Return top 10 results\nconst finalResults = filteredResults.slice(0, 10);\n\n// Update search result with filtered and scored results\nsearchResult.data.results = finalResults;\nsearchResult.data.totalResults = finalResults.length;\nsearchResult.data.qualityFilter = {\n  originalCount: results.length,\n  filteredCount: finalResults.length,\n  averageScore: finalResults.length > 0 ? \n    finalResults.reduce((sum, r) => sum + r.relevanceScore, 0) / finalResults.length : 0\n};\n\nreturn [{\n  json: searchResult\n}];"
+      },
+      "id": "quality-filter",
+      "name": "Filter and Rank Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "json": [
+            {
+              "name": "success",
+              "value": "={{ $json.success }}"
+            },
+            {
+              "name": "data",
+              "value": "={{ $json.data }}"
+            }
+          ],
+          "string": [
+            {
+              "name": "metadata.workflow",
+              "value": "search-engine"
+            },
+            {
+              "name": "metadata.version",
+              "value": "1.0.0"
+            },
+            {
+              "name": "metadata.processingTime",
+              "value": "={{ $now }}"
+            },
+            {
+              "name": "metadata.requestId",
+              "value": "={{ $runIndex }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "format-final-response",
+      "name": "Standardize Output Format",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "webhook-response",
+      "name": "Return Search Results",
+      "type": "n8n-nodes-base.webhookResponse",
+      "typeVersion": 1,
+      "position": [2440, 300]
+    }
+  ],
+  "connections": {
+    "Search Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Search Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Search Input": {
+      "main": [
+        [
+          {
+            "node": "Construct Google Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construct Google Search Query": {
+      "main": [
+        [
+          {
+            "node": "SerpStack Google Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SerpStack Google Search": {
+      "main": [
+        [
+          {
+            "node": "Process SerpStack Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process SerpStack Results": {
+      "main": [
+        [
+          {
+            "node": "Check SerpStack Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check SerpStack Success": {
+      "main": [
+        [
+          {
+            "node": "SerpApi Fallback Search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Combine Primary and Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SerpApi Fallback Search": {
+      "main": [
+        [
+          {
+            "node": "Process SerpApi Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process SerpApi Results": {
+      "main": [
+        [
+          {
+            "node": "Combine Primary and Fallback",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Combine Primary and Fallback": {
+      "main": [
+        [
+          {
+            "node": "Filter and Rank Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter and Rank Results": {
+      "main": [
+        [
+          {
+            "node": "Standardize Output Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Standardize Output Format": {
+      "main": [
+        [
+          {
+            "node": "Return Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-12-01T18:30:00.000Z",
+      "updatedAt": "2025-12-01T18:30:00.000Z",
+      "id": "search-engine-tag",
+      "name": "PeopleHub"
+    }
+  ],
+  "triggerCount": 0,
+  "updatedAt": "2025-12-01T18:30:00.000Z",
+  "versionId": "1"
+}
