@@ -181,17 +181,6 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.2,
       "position": [2220, 300]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ $json }}"
-      },
-      "id": "webhook-response",
-      "name": "Return Search Results",
-      "type": "n8n-nodes-base.webhookResponse",
-      "typeVersion": 1,
-      "position": [2440, 300]
     }
   ],
   "connections": {
@@ -313,15 +302,7 @@
       ]
     },
     "Standardize Output Format": {
-      "main": [
-        [
-          {
-            "node": "Return Search Results",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": []
     }
   },
   "pinData": {},
